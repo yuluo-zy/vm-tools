@@ -1,15 +1,18 @@
 use std::collections::BTreeMap;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
-use std::sync::atomic::AtomicBool;
-use libc::EFD_NONBLOCK;
-use vmm_sys_util::epoll::{Epoll, EpollEvent};
+use std::sync::atomic::{AtomicBool, Ordering};
+use libc::{EFD_NONBLOCK, eventfd, ftok};
+use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use vmm_sys_util::eventfd::EventFd;
 use crate::event_loop::EventLoopManager;
-use crate::event_notifier::{EventNotifier, NotifierCallBack};
+use crate::event_notifier::{EventNotifier, NotifierCallBack, NotifierOperation};
 use crate::timer::{ClockState, Timer};
 use crate::utils::read_fd;
+use anyhow::{anyhow, Result};
+use log::warn;
+use crate::utils::UtilError::{BadNotifierOperation, NoParkedFd};
 
 const READY_EVENT_MAX: usize = 256;
 
@@ -46,7 +49,7 @@ impl EventLoopContext {
             kicked: AtomicBool::new(false),
             events: Arc::new(RwLock::new(BTreeMap::new())),
             gc: Arc::new(RwLock::new(Vec::new())),
-            ready_events: vec![EpollEvent::default(), READY_EVENT_MAX],
+            ready_events: vec![EpollEvent::default(); READY_EVENT_MAX],
             timers: Arc::new(Mutex::new(vec![])),
             clock_state: Arc::new(Mutex::new(ClockState::default())),
         };
@@ -59,7 +62,76 @@ impl EventLoopContext {
             read_fd(fd);
             None
         });
+        self.add_event(EventNotifier::new(
+            NotifierOperation::AddExclusion,
+            self.kick_event.as_raw_fd(),
+            None,
+            EventSet::IN,
+            vec![kick_handler],
+        )).unwrap()
+    }
 
+    pub fn tick(&mut self) {
+        self.kicked.store(true, Ordering::SeqCst);
+        if self.kick_me.load(Ordering::SeqCst) {
+            if let Err(e) = self.kick_event.write(1){
+                warn!("failed to kick eventloop, {:?}", e)
+            }
+        }
+    }
+
+    pub fn update_events(&mut self, notifiers: Vec<EventNotifier>) -> Result<()> {
+        for en in notifiers {
+            match en.op {
+                NotifierOperation::AddExclusion | NotifierOperation::AddShared => {
+                    self.add_event(en)?;
+                }
+                _ => {}
+            }
+        }
+        self.tick();
+        Ok(())
+    }
+    pub fn add_event(&mut self, mut event: EventNotifier) -> Result<()> {
+        let mut events_map = self.events.write().unwrap();
+        if let Some(notifiier) = events_map.get_mut(&event.raw_fd) {
+            if let NotifierOperation::AddExclusion = event.op {
+                return Err(anyhow!(BadNotifierOperation));
+            }
+            if notifiier.event != event.event {
+                self.epoll.ctl(
+                    ControlOperation::Modify,
+                    notifiier.raw_fd,
+                    EpollEvent::new(notifiier.event | event.event, &**notifiier as *const _ as u64),
+                )?;
+                notifiier.event |= event.event;
+            }
+            notifiier.handlers.append(&mut event.handlers);
+            if *notifiier.status.lock().unwrap() == EventStatus::Park {
+                warn!("Parked event updated!")
+            }
+            return Ok(());
+        }
+        let event = Box::new(event);
+        self.epoll.ctl(
+            ControlOperation::Add,
+            event.raw_fd,
+            EpollEvent::new(event.event, &*event as *const _ as u64),
+        )?;
+        if let Some(parked_fd) = event.parked_fd {
+            if let Some(parked) = events_map.get_mut(&parked_fd) {
+                self.epoll
+                    .ctl(ControlOperation::Delete,
+                         parked_fd,
+                         EpollEvent::default())?;
+                *parked.status.lock().unwrap() = EventStatus::Park;
+            } else {
+                return Err(anyhow!(NoParkedFd(parked_fd)));
+            }
+        }
+        events_map.insert(event.raw_fd, event);
+
+        Ok(())
     }
 }
 

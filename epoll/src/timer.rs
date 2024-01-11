@@ -1,4 +1,4 @@
-use std::intrinsics::fadd_fast;
+
 use std::time::{Duration, Instant};
 use crate::event_context::EventLoopContext;
 

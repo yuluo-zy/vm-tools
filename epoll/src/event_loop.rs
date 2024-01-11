@@ -1,6 +1,6 @@
 use std::iter::Map;
 use crate::event_context::EventLoopContext;
-
+use anyhow::Result;
 pub(crate) struct EventLoop {
     pub main_loop: EventLoopContext,
     pub io_thread: Map<String, EventLoopContext>
@@ -21,6 +21,6 @@ impl EventLoop {
 
 pub trait EventLoopManager: Send + Sync {
     fn loop_should_exit(&self) -> bool;
-    fn loop_cleanup(&self) -> Result<(), Err>;
+    fn loop_cleanup(&self) -> Result<()>;
 }
 

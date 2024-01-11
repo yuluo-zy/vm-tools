@@ -19,14 +19,14 @@ pub enum NotifierOperation {
 pub type NotifierCallBack = dyn Fn(EventSet, RawFd) -> Option<Vec<EventNotifier>>;
 
 pub struct EventNotifier {
-    raw_fd: RawFd,
-    op: NotifierOperation,
-    parked_fd: Option<RawFd>,
-    event: EventSet,
-    handlers: Vec<Rc<NotifierCallBack>>,
+    pub(crate) raw_fd: RawFd,
+    pub(crate) op: NotifierOperation,
+    pub(crate) parked_fd: Option<RawFd>,
+    pub(crate) event: EventSet,
+    pub(crate) handlers: Vec<Rc<NotifierCallBack>>,
     // 预轮询回调
     handler_poll: Option<Box<NotifierCallBack>>,
-    status: Arc<Mutex<EventStatus>>,
+    pub(crate) status: Arc<Mutex<EventStatus>>,
 }
 
 impl EventNotifier {

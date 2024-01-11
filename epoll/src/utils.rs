@@ -41,3 +41,13 @@ pub fn read_fd(fd: RawFd) -> u64 {
 
     value
 }
+
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum UtilError {
+    #[error("Notifier Operation non allowed.")]
+    BadNotifierOperation,
+    #[error("Found no parked fd {0}.")]
+    NoParkedFd(i32),
+}
