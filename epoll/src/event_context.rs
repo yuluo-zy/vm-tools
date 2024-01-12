@@ -3,6 +3,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use libc::{EFD_NONBLOCK, eventfd, ftok};
 use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use vmm_sys_util::eventfd::EventFd;
@@ -10,9 +11,9 @@ use crate::event_loop::EventLoopManager;
 use crate::event_notifier::{EventNotifier, NotifierCallBack, NotifierOperation};
 use crate::timer::{ClockState, Timer};
 use crate::utils::read_fd;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use log::warn;
-use crate::utils::UtilError::{BadNotifierOperation, NoParkedFd};
+use crate::utils::UtilError::{BadNotifierOperation, BadSyscall, NoParkedFd, NoRegisterFd};
 
 const READY_EVENT_MAX: usize = 256;
 
@@ -74,7 +75,7 @@ impl EventLoopContext {
     pub fn tick(&mut self) {
         self.kicked.store(true, Ordering::SeqCst);
         if self.kick_me.load(Ordering::SeqCst) {
-            if let Err(e) = self.kick_event.write(1){
+            if let Err(e) = self.kick_event.write(1) {
                 warn!("failed to kick eventloop, {:?}", e)
             }
         }
@@ -83,10 +84,11 @@ impl EventLoopContext {
     pub fn update_events(&mut self, notifiers: Vec<EventNotifier>) -> Result<()> {
         for en in notifiers {
             match en.op {
-                NotifierOperation::AddExclusion | NotifierOperation::AddShared => {
-                    self.add_event(en)?;
-                }
-                _ => {}
+                NotifierOperation::AddExclusion | NotifierOperation::AddShared => { self.add_event(en)?; }
+                NotifierOperation::Modify => { self.modify_event(en)?; }
+                NotifierOperation::Park => { self.park_event(en)?; }
+                NotifierOperation::Resume => { self.resume_event(en)?; }
+                NotifierOperation::Delete => { self.rm_event(en)? }
             }
         }
         self.tick();
@@ -132,6 +134,132 @@ impl EventLoopContext {
         events_map.insert(event.raw_fd, event);
 
         Ok(())
+    }
+
+    pub fn modify_event(&mut self, mut event: EventNotifier) -> Result<()> {
+        let mut events_map = self.events.write().unwrap();
+        if let Some(notifiier) = events_map.get_mut(&event.raw_fd) {
+            notifiier.handlers.clear();
+            notifiier.handlers.append(&mut event.handlers);
+        } else {
+            return Err(anyhow!(NoRegisterFd(event.raw_fd)));
+        }
+        Ok(())
+    }
+
+    pub fn park_event(&mut self, mut event: EventNotifier) -> Result<()> {
+        let mut events_map = self.events.write().unwrap();
+        if let Some(notifier) = events_map.get_mut(&event.raw_fd) {
+            self.epoll.ctl(
+                ControlOperation::Delete,
+                notifier.raw_fd,
+                EpollEvent::default(),
+            ).with_context(|| { format!("Failed to park event, event fd:{}", notifier.raw_fd) })?;
+            *notifier.status.lock().unwrap() = EventStatus::Park;
+        } else {
+            return Err(anyhow!(NoRegisterFd(event.raw_fd)));
+        }
+        Ok(())
+    }
+
+    pub fn resume_event(&mut self, mut event: EventNotifier) -> Result<()> {
+        let mut events_map = self.events.write().unwrap();
+        if let Some(notifier) = events_map.get_mut(&event.raw_fd) {
+            self.epoll.ctl(
+                ControlOperation::Add,
+                notifier.raw_fd,
+                EpollEvent::new(notifier.event, &**notifier as *const _ as u64),
+            ).with_context(|| { format!("Failed to resume event, event fd:{}", notifier.raw_fd) })?;
+            *notifier.status.lock().unwrap() = EventStatus::Alive;
+        } else {
+            return Err(anyhow!(NoRegisterFd(event.raw_fd)));
+        }
+        Ok(())
+    }
+
+    pub fn rm_event(&mut self, mut event: EventNotifier) -> Result<()> {
+        let mut events_map = self.events.write().unwrap();
+        if let Some(notifier) = events_map.get_mut(&event.raw_fd) {
+            if *notifier.status.lock().unwrap() == EventStatus::Alive {
+                if let Err(e) = self.epoll.ctl(
+                    ControlOperation::Delete,
+                    notifier.raw_fd,
+                    EpollEvent::default(),
+                ) {
+                    let error_num = e.raw_os_error().unwrap();
+                    if error_num != libc::EBADF
+                        && error_num != libc::ENOENT
+                        && error_num != libc::EPERM
+                    {
+                        return Err(anyhow!(BadSyscall(e)));
+                    } else {
+                        warn!("epoll ctl failed: {}", e);
+                    };
+                };
+            }
+
+            let parked_fd = notifier.parked_fd;
+            let event = events_map.remove(&event.raw_fd).unwrap();
+            *event.status.lock().unwrap() = EventStatus::Removed;
+            self.gc.write().unwrap().push(event);
+
+            // 当进行删除操作的时候， 相关fd 重新被添加进入 3
+            if let Some(parked_fd) = parked_fd {
+                if let Some(parked) = events_map.get_mut(&parked_fd) {
+                    self.epoll.ctl(
+                        ControlOperation::Add,
+                        parked_fd,
+                        EpollEvent::new(parked.event, &**parked as *const _ as u64),
+                    )?;
+                    *parked.status.lock().unwrap() = EventStatus::Alive;
+                } else {
+                    return Err(anyhow!(NoParkedFd(parked_fd)));
+                }
+            }
+        } else {
+            return Err(anyhow!(NoRegisterFd(event.raw_fd)));
+        }
+        Ok(())
+    }
+
+    pub fn timer_add(&mut self, func: Box<dyn Fn()>, delay: Duration) -> u64 {
+        let timer = Box::new(Timer::new(func, delay));
+        let timer_id = timer.as_ref() as *const _ as u64;
+
+        if let Ok(mut timers) = self.timers.lock() {
+            let mut index = timers.len();
+            for (item, t) in timers.iter().enumerate() {
+                if timer.expire_time < t.expire_time {
+                    index = item;
+                    break;
+                }
+            }
+            timers.insert(index, timer);
+        }
+        self.tick();
+        timer_id
+    }
+
+    pub fn timer_del(&mut self, timer_id: u64) {
+        if let Ok(mut timers) = self.timers.lock() {
+            for (item, t) in timers.iter().enumerate() {
+                if t.as_ref() as *const _ as u64 == timer_id {
+                    timers.remove(item);
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn timers_min_duration(&self) -> Option<Duration> {
+        self.kicked.store(false, Ordering::SeqCst);
+        if let Ok(mut timers) = self.timers.lock() {
+            if timers.is_empty() {
+                return None;
+            }
+            return Some(timers[0].expire_time.saturating_duration_since(Instant::now()));
+        }
+        None
     }
 }
 

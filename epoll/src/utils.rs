@@ -50,4 +50,8 @@ pub enum UtilError {
     BadNotifierOperation,
     #[error("Found no parked fd {0}.")]
     NoParkedFd(i32),
+    #[error("The fd {0} is not registered in epoll.")]
+    NoRegisterFd(i32),
+    #[error("Found bad syscall, error is {0} .")]
+    BadSyscall(std::io::Error),
 }

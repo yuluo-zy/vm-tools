@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use crate::event_context::EventLoopContext;
 
 pub struct Timer {
-    func: Box<dyn Fn()>,
-    expire_time: Instant,
+    pub func: Box<dyn Fn()>,
+    pub expire_time: Instant,
 }
 
 impl Timer {
