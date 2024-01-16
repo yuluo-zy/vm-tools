@@ -375,6 +375,7 @@ impl EventLoopContext {
     }
 
     pub fn run(&mut self) -> Result<bool> {
+        // 返回为fasle 的时候， 是通知要开始退出
         if let Some(manager_lock) = self.manager.as_ref()
             .and_then(|m| m.lock().ok()) {
             if manager_lock.loop_should_exit() {
