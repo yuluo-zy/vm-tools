@@ -25,7 +25,7 @@ pub struct EventNotifier {
     pub(crate) event: EventSet,
     pub(crate) handlers: Vec<Rc<NotifierCallBack>>,
     // 预轮询回调
-    handler_poll: Option<Box<NotifierCallBack>>,
+    pub(crate) handler_poll: Option<Box<NotifierCallBack>>,
     pub(crate) status: Arc<Mutex<EventStatus>>,
 }
 

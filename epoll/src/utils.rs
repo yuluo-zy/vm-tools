@@ -2,10 +2,27 @@ use std::ffi::c_void;
 use std::os::fd::RawFd;
 use libc::read;
 use log::warn;
+use anyhow::Result;
 
-pub fn register_event_helper(){}
+pub fn register_event_helper(
+    notifiers: Vec<EventNotifier>,
+    ctx_name: Option<&String>,
+    record_evts: &mut Vec<RawFd>,
+) -> Result<()> {
+    let mut notifiers_fds = get_notifier_raw_fds(&notifiers);
+    EventLoop::update_event(notifiers, ctx_name)?;
+    record_evts.append(&mut notifiers_fds);
+    Ok(())
+}
 
-pub fn unregister_event_helper(){}
+pub fn unregister_event_helper(
+    ctx_name: Option<&String>,
+    record_evts: &mut Vec<RawFd>,
+) -> Result<()> {
+    EventLoop::update_event(get_delete_notifiers(record_evts), ctx_name)?;
+    record_evts.clear();
+    Ok(())
+}
 
 
 /// 这段代码用于从一个文件描述符 (fd) 读取数据。
@@ -43,6 +60,8 @@ pub fn read_fd(fd: RawFd) -> u64 {
 }
 
 use thiserror::Error;
+use crate::event_loop::EventLoop;
+use crate::event_notifier::{EventNotifier, get_delete_notifiers, get_notifier_raw_fds};
 
 #[derive(Error, Debug)]
 pub enum UtilError {
@@ -54,4 +73,8 @@ pub enum UtilError {
     NoRegisterFd(i32),
     #[error("Found bad syscall, error is {0} .")]
     BadSyscall(std::io::Error),
+    #[error("Failed to execute epoll_wait syscall: {0} .")]
+    EpollWait(std::io::Error)
 }
+
+pub const AIO_PRFETCH_CYCLE_TIME: usize = 100;

@@ -9,6 +9,6 @@ edition = "2021"
 vmm-sys-util = '0.12'
 libc = "0.2"
 log = "0.4"
-nix = "0.27"
+nix = { version = "0.26.2" }
 anyhow = "1.0"
 thiserror = "1.0"
