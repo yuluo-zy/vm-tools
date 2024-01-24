@@ -55,6 +55,7 @@ dependencies = [
  "log",
  "once_cell",
  "thiserror",
+ "utils",
  "vmm-sys-util 0.11.2",
 ]
 
@@ -178,6 +179,14 @@ name = "unicode-ident"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3354b9ac3fae1ff6755cb6db53683adb661634f67557942dea4facebec0fee4b"
+
+[[package]]
+name = "utils"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "thiserror",
+]
 
 [[package]]
 name = "vmm-sys-util"
